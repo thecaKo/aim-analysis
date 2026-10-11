@@ -7,8 +7,12 @@ game-process access. Output is JSONL:
   {"ev":"clock_map","perf0":<s>,"epoch0":<s>}
   {"ev":"m","t":<ms since perf0>,"dx":int,"dy":int,"b":<button flags>}
 
-Stop with Ctrl+C.   python -m helix.capture.rawinput_logger out.jsonl
+Stop with Ctrl+C.
+  python -m helix.capture.rawinput_logger data\\run.jsonl
+  python -m helix.capture.rawinput_logger --send 192.168.0.10:8765 --name A_rapido_01
+(--send streams to helix.capture.receiver on another machine; --out also keeps a local file.)
 """
+import argparse
 import ctypes
 import json
 import sys
@@ -57,7 +61,7 @@ class WNDCLASS(ctypes.Structure):
                 ("lpszMenuName", wintypes.LPCWSTR), ("lpszClassName", wintypes.LPCWSTR)]
 
 
-def run(path):
+def run(path=None, send=None, name=None):
     if sys.platform != "win32":
         raise SystemExit("rawinput_logger only runs on Windows")
     user32, kernel32 = ctypes.windll.user32, ctypes.windll.kernel32
@@ -67,8 +71,20 @@ def run(path):
                                        ctypes.POINTER(wintypes.UINT), wintypes.UINT]
 
     perf0 = time.perf_counter()
-    out = open(path, "a", encoding="utf-8", buffering=1 << 16)
-    out.write(json.dumps({"ev": "clock_map", "perf0": perf0, "epoch0": time.time()}) + "\n")
+    sender = None
+    if send:
+        from .netsink import Sender
+        host, _, port = send.rpartition(":")
+        try:
+            sender = Sender(host, int(port), name)
+        except OSError as e:
+            raise SystemExit("cannot connect to receiver %s: %s" % (send, e))
+    out = open(path, "a", encoding="utf-8", buffering=1 << 16) if path else None
+    header = json.dumps({"ev": "clock_map", "perf0": perf0, "epoch0": time.time()})
+    if out:
+        out.write(header + "\n")
+    if sender:
+        sender.send(header)
     count = [0]
 
     def wndproc(hwnd, msg, wparam, lparam):
@@ -81,8 +97,12 @@ def run(path):
             if got != 0xFFFFFFFF and raw.header.dwType == RIM_TYPEMOUSE \
                     and not raw.mouse.usFlags & MOUSE_MOVE_ABSOLUTE:
                 m = raw.mouse
-                out.write('{"ev":"m","t":%.3f,"dx":%d,"dy":%d,"b":%d}\n'
-                          % ((now - perf0) * 1000.0, m.lLastX, m.lLastY, m.usButtonFlags))
+                line = '{"ev":"m","t":%.3f,"dx":%d,"dy":%d,"b":%d}' \
+                       % ((now - perf0) * 1000.0, m.lLastX, m.lLastY, m.usButtonFlags)
+                if out:
+                    out.write(line + "\n")
+                if sender:
+                    sender.send(line)
                 count[0] += 1
             return 0
         return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
@@ -98,7 +118,7 @@ def run(path):
     if not user32.RegisterRawInputDevices(ctypes.byref(dev), 1, ctypes.sizeof(dev)):
         raise SystemExit("RegisterRawInputDevices failed")
 
-    print("Logging to %s - Ctrl+C to stop" % path)
+    print("Logging%s%s - Ctrl+C to stop" % (" to " + path if path else "", " and streaming to " + send if send else ""))
     msg = wintypes.MSG()
     try:
         while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
@@ -107,9 +127,23 @@ def run(path):
     except KeyboardInterrupt:
         pass
     finally:
-        out.close()
+        if out:
+            out.close()
+        if sender:
+            sender.close()
         print("%d events written" % count[0])
 
 
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("out", nargs="?", help="local JSONL file (optional if --send is used)")
+    ap.add_argument("--send", metavar="HOST:PORT", help="stream to a helix receiver")
+    ap.add_argument("--name", help="run name used by the receiver for the file")
+    a = ap.parse_args()
+    if not a.out and not a.send:
+        ap.error("give a local file and/or --send")
+    run(a.out, a.send, a.name)
+
+
 if __name__ == "__main__":
-    run(sys.argv[1] if len(sys.argv) > 1 else "data/trace.jsonl")
+    main()
