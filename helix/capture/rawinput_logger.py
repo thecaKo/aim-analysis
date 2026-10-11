@@ -17,6 +17,11 @@ import ctypes
 import json
 import sys
 import time
+
+if sys.platform != "win32":
+    raise SystemExit("rawinput_logger only runs on native Windows (not Linux, macOS or WSL): "
+                     "it reads the Windows Raw Input API. Run it from PowerShell/CMD with Windows Python.")
+
 from ctypes import wintypes
 
 WM_INPUT = 0x00FF
