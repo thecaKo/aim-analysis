@@ -102,26 +102,37 @@ def run(path=None, send=None, name=None):
     count = [0]
     stamps = []   # report times (s) for the rate summary printed at exit
 
+    failed = [False]
+
     def wndproc(hwnd, msg, wparam, lparam):
         if msg == WM_INPUT:
-            now = time.perf_counter()
-            size = wintypes.UINT(ctypes.sizeof(RAWINPUT))
-            raw = RAWINPUT()
-            got = user32.GetRawInputData(lparam, RID_INPUT, ctypes.byref(raw), ctypes.byref(size),
-                                         ctypes.sizeof(RAWINPUTHEADER))
-            if got != 0xFFFFFFFF and raw.header.dwType == RIM_TYPEMOUSE \
-                    and not raw.mouse.usFlags & MOUSE_MOVE_ABSOLUTE:
-                m = raw.mouse
-                line = '{"ev":"m","t":%.3f,"dx":%d,"dy":%d,"b":%d}' \
-                       % ((now - perf0) * 1000.0, m.lLastX, m.lLastY, m.usButtonFlags)
-                if out:
-                    out.write(line + "\n")
-                if sender:
-                    sender.send(line)
-                count[0] += 1
-                stamps.append(now)
+            try:
+                handle_input(lparam)
+            except Exception as e:   # report once; a callback must not spam or raise
+                if not failed[0]:
+                    failed[0] = True
+                    print("ERROR reading raw input: %r" % (e,))
             return 0
         return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+
+    def handle_input(lparam):
+        now = time.perf_counter()
+        size = wintypes.UINT(ctypes.sizeof(RAWINPUT))
+        raw = RAWINPUT()
+        got = user32.GetRawInputData(lparam, RID_INPUT, ctypes.byref(raw), ctypes.byref(size),
+                                     ctypes.sizeof(RAWINPUTHEADER))
+        if got == 0xFFFFFFFF or raw.header.dwType != RIM_TYPEMOUSE \
+                or raw.mouse.usFlags & MOUSE_MOVE_ABSOLUTE:
+            return
+        m = raw.mouse
+        line = '{"ev":"m","t":%.3f,"dx":%d,"dy":%d,"b":%d}' \
+               % ((now - perf0) * 1000.0, m.lLastX, m.lLastY, m.u.s.usButtonFlags)
+        if out:
+            out.write(line + "\n")
+        if sender:
+            sender.send(line)
+        count[0] += 1
+        stamps.append(now)
 
     proc = WNDPROC(wndproc)  # keep a reference alive
     hinst = kernel32.GetModuleHandleW(None)
