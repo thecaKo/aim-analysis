@@ -144,6 +144,7 @@ def run(path=None, send=None, name=None, buffered=False):
     buf = ctypes.create_string_buffer(bufsize)
     last_batch = [None]
     batches = [0]
+    batch_times = []
 
     def drain_buffer():
         """Read every queued report at once. Reports have no hardware timestamp, so a
@@ -166,6 +167,7 @@ def run(path=None, send=None, name=None, buffered=False):
                 emit(now - span + span * (i + 1) / len(recs) if span else now, m)
             if recs:
                 batches[0] += 1
+                batch_times.append(now)
                 last_batch[0] = now
 
     proc = WNDPROC(wndproc)  # keep a reference alive
@@ -192,13 +194,18 @@ def run(path=None, send=None, name=None, buffered=False):
             out.close()
         if sender:
             sender.close()
-        print("%d events written" % count[0])
+        span = stamps[-1] - stamps[0] if len(stamps) > 1 else 0.0
+        print("%d events written over %.1f s" % (count[0], span))
+        if count[0] < 500:
+            print("Too few events for a rate estimate: move the mouse continuously for ~10 s.")
         if buffered:
-            if batches[0]:
-                span = (stamps[-1] - stamps[0]) or 1.0
-                print("buffered mode: %.1f reports per batch on average, %.0f batches/s "
-                      "(%d batches); per-report timing inside a batch is interpolated"
-                      % (count[0] / batches[0], batches[0] / span, batches[0]))
+            gaps = sorted(y - x for x, y in zip(batch_times, batch_times[1:]) if 0 < y - x < 0.1)
+            if gaps:
+                med = gaps[len(gaps) // 2] * 1000
+                print("buffered: %.1f reports per batch on average; median time between batches "
+                      "%.2f ms (~%.0f per s) while moving; %d batches"
+                      % (count[0] / batches[0], med, 1000 / med, batches[0]))
+                print("(timing inside a batch is interpolated)")
         else:
             gaps = sorted(b - a for a, b in zip(stamps, stamps[1:]) if 0 < b - a < 0.1)
             if gaps:
