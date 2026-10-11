@@ -75,12 +75,14 @@ class WNDCLASS(ctypes.Structure):
                 ("lpszMenuName", wintypes.LPCWSTR), ("lpszClassName", wintypes.LPCWSTR)]
 
 
-def run(path=None, send=None, name=None):
+def run(path=None, send=None, name=None, buffered=False):
     if sys.platform != "win32":
         raise SystemExit("rawinput_logger only runs on Windows")
     user32, kernel32 = ctypes.windll.user32, ctypes.windll.kernel32
     user32.DefWindowProcW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
     user32.DefWindowProcW.restype = LRESULT
+    user32.GetRawInputBuffer.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.UINT), wintypes.UINT]
+    user32.GetRawInputBuffer.restype = wintypes.UINT
     user32.GetRawInputData.argtypes = [wintypes.HANDLE, wintypes.UINT, ctypes.c_void_p,
                                        ctypes.POINTER(wintypes.UINT), wintypes.UINT]
 
@@ -107,13 +109,26 @@ def run(path=None, send=None, name=None):
     def wndproc(hwnd, msg, wparam, lparam):
         if msg == WM_INPUT:
             try:
-                handle_input(lparam)
+                drain_buffer() if buffered else handle_input(lparam)
             except Exception as e:   # report once; a callback must not spam or raise
                 if not failed[0]:
                     failed[0] = True
                     print("ERROR reading raw input: %r" % (e,))
-            return 0
+        # WM_INPUT must also reach DefWindowProc so the system can clean up.
         return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+
+    def emit(t, m):
+        line = '{"ev":"m","t":%.3f,"dx":%d,"dy":%d,"b":%d}' \
+               % ((t - perf0) * 1000.0, m.lLastX, m.lLastY, m.u.s.usButtonFlags)
+        if out:
+            out.write(line + "\n")
+        if sender:
+            sender.send(line)
+        count[0] += 1
+        stamps.append(t)
+
+    def is_relative_mouse(raw):
+        return raw.header.dwType == RIM_TYPEMOUSE and not raw.mouse.usFlags & MOUSE_MOVE_ABSOLUTE
 
     def handle_input(lparam):
         now = time.perf_counter()
@@ -121,18 +136,37 @@ def run(path=None, send=None, name=None):
         raw = RAWINPUT()
         got = user32.GetRawInputData(lparam, RID_INPUT, ctypes.byref(raw), ctypes.byref(size),
                                      ctypes.sizeof(RAWINPUTHEADER))
-        if got == 0xFFFFFFFF or raw.header.dwType != RIM_TYPEMOUSE \
-                or raw.mouse.usFlags & MOUSE_MOVE_ABSOLUTE:
-            return
-        m = raw.mouse
-        line = '{"ev":"m","t":%.3f,"dx":%d,"dy":%d,"b":%d}' \
-               % ((now - perf0) * 1000.0, m.lLastX, m.lLastY, m.u.s.usButtonFlags)
-        if out:
-            out.write(line + "\n")
-        if sender:
-            sender.send(line)
-        count[0] += 1
-        stamps.append(now)
+        if got != 0xFFFFFFFF and is_relative_mouse(raw):
+            emit(now, raw.mouse)
+
+    align = ctypes.sizeof(ctypes.c_void_p)       # NEXTRAWINPUTBLOCK alignment
+    bufsize = 64 * ((ctypes.sizeof(RAWINPUT) + align - 1) // align * align)
+    buf = ctypes.create_string_buffer(bufsize)
+    last_batch = [None]
+    batches = [0]
+
+    def drain_buffer():
+        """Read every queued report at once. Reports have no hardware timestamp, so a
+        batch of n is spread over the time since the previous batch."""
+        while True:
+            cb = wintypes.UINT(bufsize)
+            n = user32.GetRawInputBuffer(buf, ctypes.byref(cb), ctypes.sizeof(RAWINPUTHEADER))
+            if n == 0 or n == 0xFFFFFFFF:
+                return
+            now = time.perf_counter()
+            prev = last_batch[0]
+            span = now - prev if prev is not None and 0 < now - prev < 0.05 else 0.0
+            addr, recs = ctypes.addressof(buf), []
+            for _ in range(n):
+                raw = RAWINPUT.from_address(addr)
+                if is_relative_mouse(raw):
+                    recs.append(raw.mouse)
+                addr += (raw.header.dwSize + align - 1) // align * align
+            for i, m in enumerate(recs):
+                emit(now - span + span * (i + 1) / len(recs) if span else now, m)
+            if recs:
+                batches[0] += 1
+                last_batch[0] = now
 
     proc = WNDPROC(wndproc)  # keep a reference alive
     hinst = kernel32.GetModuleHandleW(None)
@@ -159,11 +193,18 @@ def run(path=None, send=None, name=None):
         if sender:
             sender.close()
         print("%d events written" % count[0])
-        gaps = sorted(b - a for a, b in zip(stamps, stamps[1:]) if b - a < 0.1)
-        if gaps:
-            med = gaps[len(gaps) // 2] * 1000
-            print("reports: median interval %.2f ms (~%.0f Hz), p10 %.2f ms, p90 %.2f ms"
-                  % (med, 1000 / med, gaps[len(gaps) // 10] * 1000, gaps[9 * len(gaps) // 10] * 1000))
+        if buffered:
+            if batches[0]:
+                span = (stamps[-1] - stamps[0]) or 1.0
+                print("buffered mode: %.1f reports per batch on average, %.0f batches/s "
+                      "(%d batches); per-report timing inside a batch is interpolated"
+                      % (count[0] / batches[0], batches[0] / span, batches[0]))
+        else:
+            gaps = sorted(b - a for a, b in zip(stamps, stamps[1:]) if 0 < b - a < 0.1)
+            if gaps:
+                med = gaps[len(gaps) // 2] * 1000
+                print("reports: median interval %.2f ms (~%.0f Hz), p10 %.2f ms, p90 %.2f ms"
+                      % (med, 1000 / med, gaps[len(gaps) // 10] * 1000, gaps[9 * len(gaps) // 10] * 1000))
 
 
 def main():
@@ -171,12 +212,14 @@ def main():
     ap.add_argument("out", nargs="?", help="local JSONL file (optional if --send is used)")
     ap.add_argument("--out", dest="out_opt", help="same as the positional file argument")
     ap.add_argument("--send", metavar="HOST:PORT", help="stream to a helix receiver")
+    ap.add_argument("--buffered", action="store_true",
+                    help="drain all queued reports per wake-up (GetRawInputBuffer)")
     ap.add_argument("--name", help="run name used by the receiver for the file")
     a = ap.parse_args()
     out = a.out_opt or a.out
     if not out and not a.send:
         ap.error("give a local file and/or --send")
-    run(out, a.send, a.name)
+    run(out, a.send, a.name, a.buffered)
 
 
 if __name__ == "__main__":
