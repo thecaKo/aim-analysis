@@ -47,9 +47,18 @@ class RAWINPUTHEADER(ctypes.Structure):
                 ("hDevice", wintypes.HANDLE), ("wParam", wintypes.WPARAM)]
 
 
+class _RAWMOUSE_BUTTONS(ctypes.Structure):
+    _fields_ = [("usButtonFlags", wintypes.USHORT), ("usButtonData", wintypes.USHORT)]
+
+
+class _RAWMOUSE_UNION(ctypes.Union):
+    _fields_ = [("ulButtons", wintypes.ULONG), ("s", _RAWMOUSE_BUTTONS)]
+
+
 class RAWMOUSE(ctypes.Structure):
-    _fields_ = [("usFlags", wintypes.USHORT), ("usButtonFlags", wintypes.USHORT),
-                ("usButtonData", wintypes.USHORT), ("ulRawButtons", wintypes.ULONG),
+    # The button union is 4-byte aligned, so usButtonFlags sits at offset 4 (not 2).
+    _fields_ = [("usFlags", wintypes.USHORT), ("u", _RAWMOUSE_UNION),
+                ("ulRawButtons", wintypes.ULONG),
                 ("lLastX", wintypes.LONG), ("lLastY", wintypes.LONG),
                 ("ulExtraInformation", wintypes.ULONG)]
 

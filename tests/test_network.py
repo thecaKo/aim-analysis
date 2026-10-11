@@ -22,6 +22,7 @@ class NetworkTests(unittest.TestCase):
             s.close()
             self.assertTrue(done.wait(5))
             srv.shutdown()
+            srv.server_close()
             files = os.listdir(d)
             self.assertEqual(files, ["B_test_01_.jsonl"])
             got = flicks.extract(trace.load(os.path.join(d, files[0])))

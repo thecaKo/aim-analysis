@@ -31,5 +31,25 @@ class FlickTests(unittest.TestCase):
         self.assertIsNotNone(s["peak_to_click_ms_med"])
 
 
+def at_125hz(events):
+    """Re-report 1 kHz events the way a 125 Hz mouse would (sum per 8 ms window)."""
+    out = {}
+    for e in events:
+        w = int(e["t"] // 8)
+        o = out.setdefault(w, {"t": (w + 1) * 8.0, "dx": 0, "dy": 0, "b": 0})
+        o["dx"] += e["dx"]; o["dy"] += e["dy"]; o["b"] |= e["b"]
+    return [out[k] for k in sorted(out)]
+
+
+class LowPollingRateTests(unittest.TestCase):
+    def test_flick_count_survives_125hz(self):
+        fs = flicks.extract(trace.from_events(at_125hz(synth.session(n_flicks=20))))
+        self.assertEqual(len(fs), 20)
+
+    def test_clicks_survive_125hz(self):
+        fs = flicks.extract(trace.from_events(at_125hz(synth.session(n_flicks=20))))
+        self.assertTrue(all(f.peak_to_click is not None for f in fs))
+
+
 if __name__ == "__main__":
     unittest.main()
