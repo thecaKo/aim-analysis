@@ -100,6 +100,7 @@ def run(path=None, send=None, name=None):
     if sender:
         sender.send(header)
     count = [0]
+    stamps = []   # report times (s) for the rate summary printed at exit
 
     def wndproc(hwnd, msg, wparam, lparam):
         if msg == WM_INPUT:
@@ -118,6 +119,7 @@ def run(path=None, send=None, name=None):
                 if sender:
                     sender.send(line)
                 count[0] += 1
+                stamps.append(now)
             return 0
         return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
 
@@ -146,6 +148,11 @@ def run(path=None, send=None, name=None):
         if sender:
             sender.close()
         print("%d events written" % count[0])
+        gaps = sorted(b - a for a, b in zip(stamps, stamps[1:]) if b - a < 0.1)
+        if gaps:
+            med = gaps[len(gaps) // 2] * 1000
+            print("reports: median interval %.2f ms (~%.0f Hz), p10 %.2f ms, p90 %.2f ms"
+                  % (med, 1000 / med, gaps[len(gaps) // 10] * 1000, gaps[9 * len(gaps) // 10] * 1000))
 
 
 def main():
