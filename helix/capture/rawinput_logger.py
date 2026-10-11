@@ -158,12 +158,14 @@ def run(path=None, send=None, name=None):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("out", nargs="?", help="local JSONL file (optional if --send is used)")
+    ap.add_argument("--out", dest="out_opt", help="same as the positional file argument")
     ap.add_argument("--send", metavar="HOST:PORT", help="stream to a helix receiver")
     ap.add_argument("--name", help="run name used by the receiver for the file")
     a = ap.parse_args()
-    if not a.out and not a.send:
+    out = a.out_opt or a.out
+    if not out and not a.send:
         ap.error("give a local file and/or --send")
-    run(a.out, a.send, a.name)
+    run(out, a.send, a.name)
 
 
 if __name__ == "__main__":
